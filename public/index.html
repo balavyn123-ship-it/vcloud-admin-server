@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VclouD — Адмін панель</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f0f1a;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+
+    /* ── LOGIN ── */
+    #loginScreen {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .login-box {
+      background: #1a1a2e;
+      border: 1px solid #2a2a4a;
+      border-radius: 16px;
+      padding: 48px;
+      width: 380px;
+      text-align: center;
+    }
+    .login-box h1 { font-size: 28px; margin-bottom: 8px; color: #fff; }
+    .login-box p  { color: #888; margin-bottom: 32px; }
+
+    /* ── ADMIN ── */
+    #adminScreen { display: none; }
+
+    header {
+      background: #1a1a2e;
+      border-bottom: 1px solid #2a2a4a;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 22px; color: #fff; }
+    header span { color: #888; font-size: 14px; }
+
+    .main { max-width: 900px; margin: 40px auto; padding: 0 24px; }
+
+    /* ── ADD FORM ── */
+    .add-card {
+      background: #1a1a2e;
+      border: 1px solid #2a2a4a;
+      border-radius: 16px;
+      padding: 32px;
+      margin-bottom: 40px;
+    }
+    .add-card h2 { font-size: 20px; margin-bottom: 24px; color: #fff; }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 160px;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .form-full { grid-column: 1 / -1; }
+
+    label { display: block; font-size: 13px; color: #888; margin-bottom: 6px; }
+    input {
+      width: 100%;
+      background: #0f0f1a;
+      border: 1px solid #2a2a4a;
+      border-radius: 10px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 15px;
+      transition: border-color .2s;
+    }
+    input:focus { outline: none; border-color: #6c63ff; }
+    input::placeholder { color: #444; }
+
+    /* ── LOG ── */
+    .log {
+      display: none;
+      background: #0a0a14;
+      border: 1px solid #2a2a4a;
+      border-radius: 10px;
+      padding: 16px;
+      margin: 16px 0;
+      font-family: monospace;
+      font-size: 14px;
+      min-height: 80px;
+    }
+    .log-line { padding: 3px 0; animation: fadeIn .3s; }
+    .log-line.ok   { color: #2ecc71; }
+    .log-line.warn { color: #f39c12; }
+    .log-line.err  { color: #e74c3c; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+
+    /* ── PREVIEW ── */
+    .preview {
+      display: none;
+      background: #0f0f1a;
+      border: 1px solid #2ecc71;
+      border-radius: 12px;
+      padding: 16px;
+      margin: 16px 0;
+      flex-direction: row;
+      gap: 16px;
+      align-items: center;
+    }
+    .preview img { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; }
+    .preview-info h3 { color: #fff; font-size: 16px; }
+    .preview-info p  { color: #888; font-size: 13px; margin-top: 4px; }
+    .preview-info .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      margin-top: 6px;
+      background: #1a3a2e;
+      color: #2ecc71;
+    }
+
+    /* ── BUTTONS ── */
+    .btn {
+      padding: 13px 28px;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: #6c63ff; color: #fff; width: 100%; }
+    .btn-primary:hover:not(:disabled) { opacity: .9; }
+    .btn-danger  { background: #e74c3c22; color: #e74c3c; border: 1px solid #e74c3c44; padding: 6px 14px; font-size: 13px; border-radius: 8px; }
+
+    /* ── PRODUCTS LIST ── */
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .section-title h2 { font-size: 20px; color: #fff; }
+    .count-badge {
+      background: #6c63ff22;
+      color: #6c63ff;
+      padding: 4px 14px;
+      border-radius: 20px;
+      font-size: 14px;
+    }
+
+    .product-list { display: flex; flex-direction: column; gap: 12px; }
+    .product-item {
+      background: #1a1a2e;
+      border: 1px solid #2a2a4a;
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      transition: border-color .2s;
+    }
+    .product-item:hover { border-color: #6c63ff44; }
+    .product-item img {
+      width: 64px; height: 64px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #0f0f1a;
+      flex-shrink: 0;
+    }
+    .product-item .info { flex: 1; }
+    .product-item .info h3 { color: #fff; font-size: 15px; }
+    .product-item .info p  { color: #888; font-size: 13px; margin-top: 2px; }
+    .product-item .price   { color: #6c63ff; font-weight: 700; font-size: 16px; white-space: nowrap; }
+    .ai-ok   { color: #2ecc71; font-size: 12px; }
+    .ai-warn { color: #f39c12; font-size: 12px; }
+    .ai-err  { color: #e74c3c; font-size: 12px; }
+
+    .empty { text-align: center; color: #444; padding: 60px 0; font-size: 16px; }
+
+    /* ── SITE LINK ── */
+    .site-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #6c63ff;
+      text-decoration: none;
+      font-size: 14px;
+      padding: 8px 16px;
+      border: 1px solid #6c63ff44;
+      border-radius: 8px;
+    }
+    .site-link:hover { background: #6c63ff11; }
+  </style>
+</head>
+<body>
+
+<!-- ══ LOGIN ══════════════════════════════════════════════════ -->
+<div id="loginScreen">
+  <div class="login-box">
+    <h1>VclouD</h1>
+    <p>Адмін панель магазину</p>
+    <div style="margin-bottom:16px">
+      <label>Пароль</label>
+      <input type="password" id="passwordInput" placeholder="Введи пароль..." onkeydown="if(event.key==='Enter')login()">
+    </div>
+    <button class="btn btn-primary" onclick="login()">Увійти</button>
+    <p id="loginError" style="color:#e74c3c;margin-top:12px;font-size:14px"></p>
+  </div>
+</div>
+
+<!-- ══ ADMIN ══════════════════════════════════════════════════ -->
+<div id="adminScreen">
+  <header>
+    <h1>⚡ VclouD Admin</h1>
+    <div style="display:flex;gap:16px;align-items:center">
+      <a href="https://vcloud-v2.netlify.app" target="_blank" class="site-link">🌐 Відкрити сайт</a>
+      <span id="headerCount"></span>
+    </div>
+  </header>
+
+  <div class="main">
+    <!-- Форма додавання -->
+    <div class="add-card">
+      <h2>➕ Додати товар</h2>
+      <div class="form-grid">
+        <div>
+          <label>Назва товару *</label>
+          <input type="text" id="titleInput" placeholder="Наприклад: Nike Air Max 90 чорні">
+        </div>
+        <div>
+          <label>Ціна (грн) *</label>
+          <input type="number" id="priceInput" placeholder="2500">
+        </div>
+        <div class="form-full">
+          <label>Посилання на товар (необов'язково — для точного фото)</label>
+          <input type="url" id="urlInput" placeholder="https://rozetka.com.ua/... або https://prom.ua/... або будь-який інший сайт">
+        </div>
+      </div>
+
+      <div class="log" id="logBox"></div>
+      <div class="preview" id="previewBox">
+        <img id="previewImg" src="" alt="">
+        <div class="preview-info">
+          <h3 id="previewTitle"></h3>
+          <p id="previewAI"></p>
+          <span class="badge" id="previewCategory"></span>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="addBtn" onclick="addProduct()">
+        Додати товар на сайт
+      </button>
+    </div>
+
+    <!-- Список товарів -->
+    <div class="section-title">
+      <h2>📦 Товари в каталозі</h2>
+      <span class="count-badge" id="countBadge">0 товарів</span>
+    </div>
+    <div class="product-list" id="productList">
+      <div class="empty">Завантаження...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API = window.location.origin;
+  let token = localStorage.getItem("vcloud_token") || "";
+
+  // ── Авторизація ──────────────────────────────────────────────
+  async function login() {
+    const pass = document.getElementById("passwordInput").value;
+    const res  = await fetch(`${API}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pass }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      token = data.token;
+      localStorage.setItem("vcloud_token", token);
+      showAdmin();
+    } else {
+      document.getElementById("loginError").textContent = "❌ Невірний пароль";
+    }
+  }
+
+  function showAdmin() {
+    document.getElementById("loginScreen").style.display = "none";
+    document.getElementById("adminScreen").style.display = "block";
+    loadProducts();
+  }
+
+  // Якщо вже є токен — одразу показуємо адмін
+  if (token) showAdmin();
+
+  // ── Завантажити список товарів ───────────────────────────────
+  async function loadProducts() {
+    const res  = await fetch(`${API}/api/products`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) { token = ""; localStorage.removeItem("vcloud_token"); location.reload(); return; }
+    const data = await res.json();
+    renderProducts(data.products);
+    updateCount(data.total);
+  }
+
+  function renderProducts(list) {
+    const el = document.getElementById("productList");
+    if (!list.length) { el.innerHTML = '<div class="empty">Поки немає товарів. Додай перший! 👆</div>'; return; }
+
+    el.innerHTML = list.slice().reverse().map(p => `
+      <div class="product-item">
+        <img src="${p.image || ''}" onerror="this.src=''" alt="">
+        <div class="info">
+          <h3>${p.title}</h3>
+          <p class="${aiClass(p.aiCheck)}">${p.aiCheck || ''} &nbsp;·&nbsp; ${p.category} &nbsp;·&nbsp; ${p.date || ''}</p>
+        </div>
+        <div class="price">${p.price.toLocaleString('uk-UA')} ₴</div>
+        <button class="btn btn-danger" onclick="deleteProduct(${p.id})">✕</button>
+      </div>
+    `).join("");
+  }
+
+  function aiClass(s) {
+    if (!s) return "";
+    if (s.includes("✅")) return "ai-ok";
+    if (s.includes("⚠️")) return "ai-warn";
+    return "ai-err";
+  }
+
+  function updateCount(n) {
+    document.getElementById("countBadge").textContent = `${n} товарів`;
+    document.getElementById("headerCount").textContent = `${n} товарів`;
+  }
+
+  // ── Додати товар ─────────────────────────────────────────────
+  async function addProduct() {
+    const title = document.getElementById("titleInput").value.trim();
+    const price = document.getElementById("priceInput").value.trim();
+    const url   = document.getElementById("urlInput").value.trim();
+
+    if (!title || !price) { alert("Введи назву і ціну!"); return; }
+
+    const btn = document.getElementById("addBtn");
+    btn.disabled = true;
+    btn.textContent = "Обробляю...";
+
+    const logBox     = document.getElementById("logBox");
+    const previewBox = document.getElementById("previewBox");
+    logBox.style.display     = "block";
+    previewBox.style.display = "none";
+    logBox.innerHTML = "";
+
+    function log(msg) {
+      const cls = msg.includes("✅") ? "ok" : msg.includes("⚠️") ? "warn" : msg.includes("❌") ? "err" : "";
+      logBox.innerHTML += `<div class="log-line ${cls}">${msg}</div>`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    try {
+      const res = await fetch(`${API}/api/products`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ title, price: Number(price), url }),
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            log(event.message);
+            if (event.step === "done" && event.product) {
+              const p = event.product;
+              // Показуємо прев'ю
+              previewBox.style.display = "flex";
+              document.getElementById("previewImg").src = p.image || "";
+              document.getElementById("previewTitle").textContent = p.title;
+              document.getElementById("previewAI").textContent = p.aiCheck || "";
+              document.getElementById("previewCategory").textContent = p.category;
+              // Очищаємо форму
+              document.getElementById("titleInput").value = "";
+              document.getElementById("priceInput").value = "";
+              document.getElementById("urlInput").value   = "";
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      log(`❌ Помилка з'єднання: ${e.message}`);
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Додати товар на сайт";
+    loadProducts();
+  }
+
+  // ── Видалити товар ───────────────────────────────────────────
+  async function deleteProduct(id) {
+    if (!confirm("Видалити цей товар?")) return;
+    await fetch(`${API}/api/products/${id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    loadProducts();
+  }
+</script>
+</body>
+</html>
