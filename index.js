@@ -23,8 +23,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("❌ SUPABASE_URL та SUPABASE_KEY обов'язкові (env variables)");
-  process.exit(1);
+  console.error("❌ SUPABASE_URL або SUPABASE_KEY не задані — DB не працюватиме");
 }
 if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) {
   console.warn("⚠️  NETLIFY_TOKEN або NETLIFY_SITE_ID не задані — деплой не працюватиме");
