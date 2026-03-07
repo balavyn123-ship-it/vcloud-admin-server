@@ -481,7 +481,7 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
       </div>
 
       <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">
-        <a href="https://vcloud-store.org/v2/orders.html" style="color:#a78bfa;text-decoration:none;">📦 Переглянути замовлення</a>
+        <a href="https://vcloud-store.org/orders.html" style="color:#a78bfa;text-decoration:none;">📦 Переглянути замовлення</a>
         &nbsp;·&nbsp;
         <a href="https://vcloud-store.org" style="color:#666;text-decoration:none;">vcloud-store.org</a>
       </p>
@@ -652,8 +652,8 @@ app.post("/api/nowpayments/create", async (req, res) => {
       order_id:          String(order_id),
       order_description: order_description || `VclouD замовлення #${order_id}`,
       customer_email:    email || "",
-      success_url:       `https://vcloud-store.org/v2/orders.html?new=1&order=${order_id}&paid=1`,
-      cancel_url:        "https://vcloud-store.org/v2/checkout.html",
+      success_url:       `https://vcloud-store.org/orders.html?new=1&order=${order_id}&paid=1`,
+      cancel_url:        "https://vcloud-store.org/checkout.html",
       is_fixed_rate:     false,
       is_fee_paid_by_user: false
     };
@@ -789,8 +789,8 @@ app.post("/api/portmone/create", auth, async (req, res) => {
             billAmount:      Number(amount_uah).toFixed(2),
             billCurrency:    "UAH",
             description:     description || `VclouD замовлення #${order_id}`,
-            successUrl:      `https://vcloud-store.org/v2/orders.html?new=1&order=${order_id}&paid=1`,
-            failureUrl:      `https://vcloud-store.org/v2/checkout.html`,
+            successUrl:      `https://vcloud-store.org/orders.html?new=1&order=${order_id}&paid=1`,
+            failureUrl:      `https://vcloud-store.org/checkout.html`,
             payer: { email: email || "" }
           }
         }
