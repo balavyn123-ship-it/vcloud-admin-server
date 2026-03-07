@@ -572,6 +572,41 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
   }
 });
 
+// ─── Одноразова міграція: додаємо NOWPayments колонки ──────────
+app.get("/api/migrate-nowpayments", async (req, res) => {
+  try {
+    const cols = [
+      { name: "nowpayments_id",  type: "TEXT" },
+      { name: "paid_amount",     type: "TEXT" },
+      { name: "paid_currency",   type: "TEXT" },
+      { name: "paid_at",         type: "TIMESTAMPTZ" },
+      { name: "payment_method",  type: "TEXT" },
+      { name: "crypto_curr",     type: "TEXT" },
+    ];
+    const results = [];
+    for (const col of cols) {
+      // Пробуємо зробити select — якщо колонки немає, отримаємо помилку
+      const { error } = await supabase.from("orders").select(col.name).limit(1);
+      if (!error) {
+        results.push(`✅ ${col.name} — вже є`);
+      } else {
+        // Колонки немає — додаємо через RPC або відзначаємо для ручного додавання
+        results.push(`⚠️ ${col.name} (${col.type}) — ПОТРІБНО ДОДАТИ ВРУЧНУ`);
+      }
+    }
+    res.json({ ok: true, results, sql: [
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS nowpayments_id TEXT;",
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_amount TEXT;",
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_currency TEXT;",
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;",
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;",
+      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_curr TEXT;",
+    ]});
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.listen(PORT, async () => {
   console.log(`✅ VclouD Admin Server запущено на порту ${PORT}`);
   console.log(`🗄️  Supabase: ${SUPABASE_URL}`);
