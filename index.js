@@ -185,28 +185,7 @@ async function deployToNetlify() {
 // API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
-// Міграція БД — додати колонку stock
-app.post("/api/migrate", async (req, res) => {
-  try {
-    // Використовуємо supabase-js через fetch напряму до PostgreSQL REST
-    const result = await fetch(`${SUPABASE_URL}/rest/v1/rpc/add_stock_column`, {
-      method: "POST",
-      headers: {
-        "apikey": SUPABASE_KEY,
-        "Authorization": `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({})
-    });
-    // Якщо RPC не існує — робимо через прямий SQL через node-postgres якщо є
-    // Або просто повертаємо інструкцію
-    const text = await result.text();
-    res.json({ ok: true, result: text });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
-});
-
+// Авторизація
 app.post("/api/login", (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
@@ -361,102 +340,6 @@ app.get("/health", async (req, res) => {
     res.json({ ok: false, db: "supabase ❌" });
   }
 });
-
-// ─── USER REGISTRATION ────────────────────────────────────────────
-app.post("/api/user/register", async (req, res) => {
-  try {
-    const { email, password, name, phone } = req.body;
-    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
-    if (password.length < 6) return res.status(400).json({ error: "Пароль мінімум 6 символів" });
-
-    // Перевірка чи вже існує
-    const { data: existing } = await supabase.from("users").select("id").eq("email", email.toLowerCase()).maybeSingle();
-    if (existing) return res.status(409).json({ error: "Email вже зареєстрований" });
-
-    // Простий hash через Buffer (bcrypt не потрібен для MVP)
-    const crypto = require("crypto");
-    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
-
-    const { data, error } = await supabase.from("users").insert({
-      email: email.toLowerCase(),
-      password: hash,
-      name: name || "",
-      phone: phone || ""
-    }).select().single();
-
-    if (error) throw error;
-    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── USER LOGIN ───────────────────────────────────────────────────
-app.post("/api/user/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
-
-    const crypto = require("crypto");
-    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
-
-    const { data, error } = await supabase.from("users").select("id,email,name,phone,password").eq("email", email.toLowerCase()).maybeSingle();
-    if (error) throw error;
-    if (!data) return res.status(401).json({ error: "Невірний email або пароль" });
-    if (data.password !== hash) return res.status(401).json({ error: "Невірний email або пароль" });
-
-    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ORDERS — create ──────────────────────────────────────────────
-app.post("/api/orders", async (req, res) => {
-  try {
-    const { user_id, email, name, phone, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
-    if (!email || !items || !items.length) return res.status(400).json({ error: "email та items обов'язкові" });
-
-    const { data, error } = await supabase.from("orders").insert({
-      user_id:        user_id || email,
-      email:          email,
-      name:           name || "",
-      phone:          phone || "",
-      items:          items,
-      total_uah:      Number(total_uah) || 0,
-      status:         "pending",
-      payment_method: payment_method || "crypto",
-      crypto_curr:    crypto_curr || null,
-      crypto_addr:    crypto_addr || null,
-      crypto_amount:  crypto_amount ? String(crypto_amount) : null
-    }).select().single();
-
-    if (error) throw error;
-    res.json({ ok: true, id: data.id });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ORDERS — get by user ─────────────────────────────────────────
-app.get("/api/orders", async (req, res) => {
-  try {
-    const { user_id, email } = req.query;
-    if (!user_id && !email) return res.status(400).json({ error: "user_id або email обов'язковий" });
-
-    let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
-    if (user_id) query = query.eq("user_id", user_id);
-    else if (email) query = query.eq("email", email.toLowerCase());
-
-    const { data, error } = await query;
-    if (error) throw error;
-    res.json({ orders: data || [] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
 
 app.listen(PORT, async () => {
   console.log(`✅ VclouD Admin Server запущено на порту ${PORT}`);
