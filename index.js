@@ -38,14 +38,28 @@ if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// PostgreSQL прямий клієнт для DDL міграцій
-// Supabase connection string: postgresql://postgres.[ref]:[password]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
+// PostgreSQL прямий клієнт для DDL міграцій — підключається лише при потребі
 const DB_URL = process.env.DATABASE_URL ||
   "postgresql://postgres.rnvdfmenlvqerdnleesy:J94UseTs9ZVo9mF3@aws-0-eu-central-1.pooler.supabase.com:6543/postgres";
-const pgPool = new Pool({
-  connectionString: DB_URL,
-  ssl: { rejectUnauthorized: false }
-});
+
+// НЕ створюємо пул одразу — тільки ліниво при запиті міграції
+let pgPool = null;
+function getPgPool() {
+  if (!pgPool) {
+    pgPool = new Pool({
+      connectionString: DB_URL,
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 8000,
+      idleTimeoutMillis: 10000,
+      max: 1,
+    });
+    pgPool.on("error", (err) => {
+      console.warn("pgPool error (non-fatal):", err.message);
+      pgPool = null; // скидаємо, щоб наступного разу заново
+    });
+  }
+  return pgPool;
+}
 
 app.use(cors());
 // Raw body потрібен для перевірки підпису NOWPayments webhook
@@ -594,10 +608,10 @@ app.get("/api/migrate-nowpayments", async (req, res) => {
   ];
 
   const results = [];
-
-  if (pgPool) {
-    // Прямий PostgreSQL — найнадійніший варіант
-    const client = await pgPool.connect();
+  let pool;
+  try {
+    pool = getPgPool();
+    const client = await pool.connect();
     try {
       for (const sql of sqls) {
         const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1] || sql;
@@ -611,9 +625,10 @@ app.get("/api/migrate-nowpayments", async (req, res) => {
     } finally {
       client.release();
     }
-  } else {
-    results.push("❌ DATABASE_URL не задана — додайте її в Render Environment Variables");
-    results.push("Значення: postgresql://postgres.rnvdfmenlvqerdnleesy:[DB_PASSWORD]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres");
+  } catch (connErr) {
+    results.push(`❌ Не вдалось підключитись до PostgreSQL: ${connErr.message}`);
+    results.push("💡 Додайте DATABASE_URL в Render Environment Variables і спробуйте знову");
+    pgPool = null; // скидаємо пул
   }
 
   // Перевіряємо реальний стан через select
