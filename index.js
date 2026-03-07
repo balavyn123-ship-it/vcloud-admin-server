@@ -4,7 +4,7 @@ const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const path = require("path");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
+// nodemailer замінено на Resend HTTP API
 const { createClient } = require("@supabase/supabase-js");
 const { Pool } = require("pg");
 
@@ -434,21 +434,11 @@ app.post("/api/user/login", async (req, res) => {
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
 const TG_CHAT_ID   = process.env.TG_CHAT_ID   || "";
 
-// ─── Email (nodemailer) ──────────────────────────────────────────
-const EMAIL_USER = process.env.EMAIL_USER || ""; // напр. vcloud.store@gmail.com
-const EMAIL_PASS = process.env.EMAIL_PASS || ""; // App Password Gmail
-
-function getMailTransporter() {
-  if (!EMAIL_USER || !EMAIL_PASS) return null;
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: EMAIL_USER, pass: EMAIL_PASS }
-  });
-}
+// ─── Email (Resend HTTP API) ─────────────────────────────────────
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 
 async function sendOrderConfirmationEmail(order, items, total_uah) {
-  const transporter = getMailTransporter();
-  if (!transporter || !order.email) return;
+  if (!RESEND_API_KEY || !order.email) return;
   try {
     const itemsHtml = (items || []).map(i =>
       `<tr>
@@ -493,13 +483,25 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
       <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">VclouD · vcloud-v2.netlify.app</p>
     </div>`;
 
-    await transporter.sendMail({
-      from: `"VclouD" <${EMAIL_USER}>`,
-      to:   order.email,
-      subject: `✅ Замовлення #${order.id} прийнято — VclouD`,
-      html
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: "VclouD <onboarding@resend.dev>",
+        to:   [order.email],
+        subject: `✅ Замовлення #${order.id} прийнято — VclouD`,
+        html
+      })
     });
-    console.log(`📧 Email відправлено → ${order.email}`);
+    if (res.ok) {
+      console.log(`📧 Email відправлено → ${order.email}`);
+    } else {
+      const err = await res.text();
+      console.warn("Email send failed:", res.status, err);
+    }
   } catch (e) {
     console.warn("Email send failed:", e.message);
   }
