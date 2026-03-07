@@ -1,20 +1,13 @@
-name: Deploy to Railway
+name: CI
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Deploy to Railway
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          railway up --service admin-server --project ${{ secrets.RAILWAY_PROJECT_ID }} --detach
+      - name: Check syntax
+        run: node --check index.js && echo "✅ Syntax OK — Render auto-deploys from GitHub"
