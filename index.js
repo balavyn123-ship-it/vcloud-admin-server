@@ -219,7 +219,7 @@ function aiCheck(searchTitle, foundTitle, images) {
 async function deployToNetlify() {
   // Нічого не деплоїмо — сайт читає з API в реальному часі
   console.log("ℹ️  Деплой Netlify пропущено — сайт читає з API напряму");
-  return { ok: true, url: "https://vcloud-v2.netlify.app" };
+  return { ok: true, url: "https://vcloud-store.org" };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -480,7 +480,7 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
         </a>
       </div>
 
-      <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">VclouD · vcloud-v2.netlify.app</p>
+      <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">VclouD · vcloud-store.org</p>
     </div>`;
 
     const res = await fetch("https://api.resend.com/emails", {
@@ -648,8 +648,8 @@ app.post("/api/nowpayments/create", async (req, res) => {
       order_id:          String(order_id),
       order_description: order_description || `VclouD замовлення #${order_id}`,
       customer_email:    email || "",
-      success_url:       `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}&paid=1`,
-      cancel_url:        "https://vcloud-v2.netlify.app/v2/checkout.html",
+      success_url:       `https://vcloud-store.org/v2/orders.html?new=1&order=${order_id}&paid=1`,
+      cancel_url:        "https://vcloud-store.org/v2/checkout.html",
       is_fixed_rate:     false,
       is_fee_paid_by_user: false
     };
@@ -785,8 +785,8 @@ app.post("/api/portmone/create", auth, async (req, res) => {
             billAmount:      Number(amount_uah).toFixed(2),
             billCurrency:    "UAH",
             description:     description || `VclouD замовлення #${order_id}`,
-            successUrl:      `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}&paid=1`,
-            failureUrl:      `https://vcloud-v2.netlify.app/v2/checkout.html`,
+            successUrl:      `https://vcloud-store.org/v2/orders.html?new=1&order=${order_id}&paid=1`,
+            failureUrl:      `https://vcloud-store.org/v2/checkout.html`,
             payer: { email: email || "" }
           }
         }
