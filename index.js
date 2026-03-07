@@ -3,6 +3,7 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const path = require("path");
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 // Завантажуємо .env лише локально (на Railway є env variables)
@@ -22,6 +23,11 @@ const ADMIN_PASSWORD  = process.env.ADMIN_PASSWORD  || "vcloud2026";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
+// ─── NOWPayments ────────────────────────────────────────────────
+const NWP_API_KEY    = process.env.NWP_API_KEY    || "QNSGEWK-93041FR-J5262DS-YFBT1VB";
+const NWP_IPN_SECRET = process.env.NWP_IPN_SECRET || "uPefK51CZf9JABD1xBi6m2j7BCK/JYPi";
+const NWP_API        = "https://api.nowpayments.io/v1";
+
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("❌ SUPABASE_URL або SUPABASE_KEY не задані — DB не працюватиме");
 }
@@ -32,6 +38,16 @@ if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 app.use(cors());
+// Raw body потрібен для перевірки підпису NOWPayments webhook
+app.use((req, res, next) => {
+  if (req.path === "/api/nowpayments/webhook") {
+    let data = "";
+    req.on("data", chunk => { data += chunk; });
+    req.on("end", () => { req.rawBody = data; req.body = JSON.parse(data || "{}"); next(); });
+  } else {
+    next();
+  }
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -429,6 +445,129 @@ app.get("/api/orders", async (req, res) => {
     if (error) throw error;
     res.json({ orders: data || [] });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── NOWPAYMENTS — створити інвойс ───────────────────────────────
+// POST /api/nowpayments/create  { order_id, amount_uah, currency, email, order_description }
+app.post("/api/nowpayments/create", async (req, res) => {
+  try {
+    const { order_id, amount_uah, currency, email, order_description } = req.body;
+    if (!order_id || !amount_uah || !currency) {
+      return res.status(400).json({ error: "order_id, amount_uah, currency обов'язкові" });
+    }
+
+    // NOWPayments приймає суму в будь-якій фіатній валюті
+    // pay_currency — крипта, price_currency — фіат (UAH)
+    const body = {
+      price_amount:      Number(amount_uah),
+      price_currency:    "uah",
+      pay_currency:      currency.toLowerCase(), // usdt, btc, eth, ton
+      ipn_callback_url:  "https://vcloud-admin-server.onrender.com/api/nowpayments/webhook",
+      order_id:          String(order_id),
+      order_description: order_description || "VclouD Order",
+      customer_email:    email || "",
+      success_url:       `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}`,
+      cancel_url:        "https://vcloud-v2.netlify.app/v2/checkout.html"
+    };
+
+    const nwpRes = await fetch(`${NWP_API}/payment`, {
+      method:  "POST",
+      headers: {
+        "x-api-key":    NWP_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const nwpData = await nwpRes.json();
+    if (!nwpRes.ok) {
+      console.error("NOWPayments error:", nwpData);
+      return res.status(502).json({ error: nwpData.message || "NOWPayments API error" });
+    }
+
+    // Зберігаємо nowpayments_id в замовленні
+    await supabase.from("orders")
+      .update({ nowpayments_id: String(nwpData.payment_id), status: "waiting_payment" })
+      .eq("id", order_id);
+
+    res.json({
+      payment_id:      nwpData.payment_id,
+      pay_address:     nwpData.pay_address,
+      pay_amount:      nwpData.pay_amount,
+      pay_currency:    nwpData.pay_currency,
+      payment_status:  nwpData.payment_status,
+      expiration_estimate_date: nwpData.expiration_estimate_date
+    });
+  } catch (err) {
+    console.error("NOWPayments create error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── NOWPAYMENTS — перевірити статус ─────────────────────────────
+// GET /api/nowpayments/status/:payment_id
+app.get("/api/nowpayments/status/:payment_id", async (req, res) => {
+  try {
+    const nwpRes = await fetch(`${NWP_API}/payment/${req.params.payment_id}`, {
+      headers: { "x-api-key": NWP_API_KEY }
+    });
+    const data = await nwpRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── NOWPAYMENTS — IPN webhook ────────────────────────────────────
+// NOWPayments надсилає POST сюди при зміні статусу платежу
+app.post("/api/nowpayments/webhook", async (req, res) => {
+  try {
+    // Перевіряємо підпис
+    const receivedSig = req.headers["x-nowpayments-sig"];
+    if (receivedSig && NWP_IPN_SECRET) {
+      const sorted = JSON.stringify(
+        Object.keys(req.body).sort().reduce((acc, k) => { acc[k] = req.body[k]; return acc; }, {})
+      );
+      const expectedSig = crypto.createHmac("sha512", NWP_IPN_SECRET).update(sorted).digest("hex");
+      if (receivedSig !== expectedSig) {
+        console.warn("❌ NOWPayments webhook: невірний підпис");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+    }
+
+    const { payment_id, payment_status, order_id, actually_paid, pay_currency } = req.body;
+    console.log(`📥 NOWPayments webhook: order=${order_id} status=${payment_status} payment=${payment_id}`);
+
+    // Статуси: waiting → confirming → confirmed → finished → partially_paid / failed / expired
+    const statusMap = {
+      finished:        "paid",
+      confirmed:       "paid",
+      partially_paid:  "partial",
+      failed:          "failed",
+      expired:         "expired",
+      confirming:      "confirming",
+      waiting:         "waiting_payment"
+    };
+
+    const newStatus = statusMap[payment_status] || payment_status;
+
+    if (order_id) {
+      await supabase.from("orders").update({
+        status:          newStatus,
+        nowpayments_id:  String(payment_id),
+        paid_amount:     actually_paid ? String(actually_paid) : null,
+        paid_currency:   pay_currency || null,
+        paid_at:         (payment_status === "finished" || payment_status === "confirmed") ? new Date().toISOString() : null
+      }).eq("id", order_id);
+
+      console.log(`✅ Замовлення #${order_id} → статус: ${newStatus}`);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("NOWPayments webhook error:", err);
     res.status(500).json({ error: err.message });
   }
 });
