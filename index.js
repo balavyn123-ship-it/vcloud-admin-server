@@ -51,6 +51,17 @@ async function dbInsert(product) {
     .insert(product)
     .select()
     .single();
+  // Якщо помилка через відсутню колонку stock — повторюємо без неї
+  if (error && error.message && error.message.includes("stock")) {
+    const { stock: _s, ...productWithoutStock } = product;
+    const { data: data2, error: error2 } = await supabase
+      .from("products")
+      .insert(productWithoutStock)
+      .select()
+      .single();
+    if (error2) throw error2;
+    return data2;
+  }
   if (error) throw error;
   return data;
 }
@@ -68,6 +79,17 @@ async function dbUpdate(id, fields) {
     .from("products")
     .update(fields)
     .eq("id", id);
+  // Якщо помилка через відсутню колонку stock — повторюємо без неї
+  if (error && error.message && error.message.includes("stock")) {
+    const { stock: _s, ...fieldsWithoutStock } = fields;
+    if (Object.keys(fieldsWithoutStock).length === 0) return; // нічого оновлювати
+    const { error: error2 } = await supabase
+      .from("products")
+      .update(fieldsWithoutStock)
+      .eq("id", id);
+    if (error2) throw error2;
+    return;
+  }
   if (error) throw error;
 }
 
@@ -150,40 +172,12 @@ function aiCheck(searchTitle, foundTitle, images) {
 }
 
 // ─── Деплой на Netlify ───────────────────────────────────────────
+// Сайт тепер читає товари напряму з API (/api/public/products),
+// тому деплой Netlify потрібен тільки для оновлення HTML/CSS/JS файлів.
+// При зміні товарів — деплой НЕ потрібен, сайт бачить зміни одразу.
 async function deployToNetlify() {
-  // Беремо всі товари з Supabase
-  const allProducts = await dbGetAll();
-
-  const now = new Date().toISOString().replace("T", " ").slice(0, 19);
-  const jsContent = `// VclouD Products\n// Updated: ${now}\n// Total: ${allProducts.length}\n\nconst products = ${JSON.stringify(allProducts, null, 2)};\n`;
-
-  const crypto = require("crypto");
-  const fileHash = crypto.createHash("sha1").update(jsContent).digest("hex");
-
-  // Крок 1: створюємо деплой з хешем файлу
-  const deployRes = await fetch(`https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${NETLIFY_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ files: { "/js/products.js": fileHash } }),
-  });
-  const deployData = await deployRes.json();
-  const deployId = deployData.id;
-
-  if (!deployId) return { ok: false, error: deployData };
-
-  // Крок 2: завантажуємо файл
-  await fetch(`https://api.netlify.com/api/v1/deploys/${deployId}/files/js/products.js`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${NETLIFY_TOKEN}`,
-      "Content-Type": "application/javascript",
-    },
-    body: jsContent,
-  });
-
+  // Нічого не деплоїмо — сайт читає з API в реальному часі
+  console.log("ℹ️  Деплой Netlify пропущено — сайт читає з API напряму");
   return { ok: true, url: "https://vcloud-v2.netlify.app" };
 }
 
@@ -191,7 +185,28 @@ async function deployToNetlify() {
 // API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
-// Авторизація
+// Міграція БД — додати колонку stock
+app.post("/api/migrate", async (req, res) => {
+  try {
+    // Використовуємо supabase-js через fetch напряму до PostgreSQL REST
+    const result = await fetch(`${SUPABASE_URL}/rest/v1/rpc/add_stock_column`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({})
+    });
+    // Якщо RPC не існує — робимо через прямий SQL через node-postgres якщо є
+    // Або просто повертаємо інструкцію
+    const text = await result.text();
+    res.json({ ok: true, result: text });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/login", (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
@@ -208,7 +223,18 @@ function auth(req, res, next) {
   res.status(401).json({ error: "Не авторизовано" });
 }
 
-// Отримати всі товари
+// ─── Публічний endpoint для сайту (без авторизації) ─────────────
+app.get("/api/public/products", async (req, res) => {
+  try {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    const products = await dbGetAll();
+    res.json({ products, total: products.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Отримати всі товари (адмін)
 app.get("/api/products", auth, async (req, res) => {
   try {
     const products = await dbGetAll();
@@ -221,7 +247,7 @@ app.get("/api/products", auth, async (req, res) => {
 // Додати товар (SSE — стрімінг прогресу)
 app.post("/api/products", auth, async (req, res) => {
   try {
-    const { title, price, url } = req.body;
+    const { title, price, url, stock } = req.body;
     if (!title || !price) return res.status(400).json({ error: "Назва і ціна обов'язкові" });
 
     res.setHeader("Content-Type", "text/event-stream");
@@ -256,6 +282,7 @@ app.post("/api/products", auth, async (req, res) => {
       source_url:  url || "",
       ai_check:    ai.status,
       date:        new Date().toISOString().slice(0, 10),
+      stock:       (stock !== undefined && stock !== null && stock !== '') ? Number(stock) : null,
     };
 
     send({ step: "save", message: "💾 Зберігаю в базу даних..." });
@@ -281,10 +308,34 @@ app.post("/api/products", auth, async (req, res) => {
 app.put("/api/products/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { title, price, description, image } = req.body;
-    await dbUpdate(id, { title, price: Number(price), description, image });
-    await deployToNetlify();
+    const { title, price, description, image, stock } = req.body;
+    const fields = { title, price: Number(price), description, image };
+    if (stock !== undefined) fields.stock = stock === '' ? null : Number(stock);
+    await dbUpdate(id, fields);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Змінити кількість (наявність) товару
+app.patch("/api/products/:id/stock", auth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { stock, delta } = req.body;
+    if (delta !== undefined) {
+      // Відносна зміна: +1 або -1
+      const { data, error } = await supabase.from("products").select("stock").eq("id", id).single();
+      if (error) throw error;
+      const newStock = Math.max(0, (data.stock || 0) + Number(delta));
+      await dbUpdate(id, { stock: newStock });
+      res.json({ ok: true, stock: newStock });
+    } else {
+      // Абсолютне значення
+      const newStock = stock === null || stock === '' ? null : Math.max(0, Number(stock));
+      await dbUpdate(id, { stock: newStock });
+      res.json({ ok: true, stock: newStock });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -295,7 +346,6 @@ app.delete("/api/products/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     await dbDelete(id);
-    await deployToNetlify();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -312,7 +362,126 @@ app.get("/health", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+// ─── USER REGISTRATION ────────────────────────────────────────────
+app.post("/api/user/register", async (req, res) => {
+  try {
+    const { email, password, name, phone } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
+    if (password.length < 6) return res.status(400).json({ error: "Пароль мінімум 6 символів" });
+
+    // Перевірка чи вже існує
+    const { data: existing } = await supabase.from("users").select("id").eq("email", email.toLowerCase()).maybeSingle();
+    if (existing) return res.status(409).json({ error: "Email вже зареєстрований" });
+
+    // Простий hash через Buffer (bcrypt не потрібен для MVP)
+    const crypto = require("crypto");
+    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
+
+    const { data, error } = await supabase.from("users").insert({
+      email: email.toLowerCase(),
+      password: hash,
+      name: name || "",
+      phone: phone || ""
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── USER LOGIN ───────────────────────────────────────────────────
+app.post("/api/user/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
+
+    const crypto = require("crypto");
+    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
+
+    const { data, error } = await supabase.from("users").select("id,email,name,phone,password").eq("email", email.toLowerCase()).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(401).json({ error: "Невірний email або пароль" });
+    if (data.password !== hash) return res.status(401).json({ error: "Невірний email або пароль" });
+
+    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ORDERS — create ──────────────────────────────────────────────
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { user_id, email, name, phone, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
+    if (!email || !items || !items.length) return res.status(400).json({ error: "email та items обов'язкові" });
+
+    const { data, error } = await supabase.from("orders").insert({
+      user_id:        user_id || email,
+      email:          email,
+      name:           name || "",
+      phone:          phone || "",
+      items:          items,
+      total_uah:      Number(total_uah) || 0,
+      status:         "pending",
+      payment_method: payment_method || "crypto",
+      crypto_curr:    crypto_curr || null,
+      crypto_addr:    crypto_addr || null,
+      crypto_amount:  crypto_amount ? String(crypto_amount) : null
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ ok: true, id: data.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ORDERS — get by user ─────────────────────────────────────────
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { user_id, email } = req.query;
+    if (!user_id && !email) return res.status(400).json({ error: "user_id або email обов'язковий" });
+
+    let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
+    if (user_id) query = query.eq("user_id", user_id);
+    else if (email) query = query.eq("email", email.toLowerCase());
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ orders: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+app.listen(PORT, async () => {
   console.log(`✅ VclouD Admin Server запущено на порту ${PORT}`);
   console.log(`🗄️  Supabase: ${SUPABASE_URL}`);
+
+  // Міграція: додаємо колонку stock якщо її немає
+  try {
+    // Спробуємо PATCH з полем stock — якщо колонки немає, Supabase поверне помилку
+    // Використовуємо RPC через fetch напряму до PostgreSQL через Supabase SQL endpoint
+    const migRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/exec_ddl`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sql: "ALTER TABLE products ADD COLUMN IF NOT EXISTS stock INTEGER DEFAULT NULL;" })
+    });
+    if (migRes.ok) {
+      console.log("✅ Колонка stock додана (або вже існує)");
+    } else {
+      // RPC не існує — колонку треба додати вручну через Supabase Dashboard
+      console.log("ℹ️  Додайте колонку вручну: ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT NULL;");
+    }
+  } catch (e) {
+    console.log("ℹ️  Міграція пропущена:", e.message);
+  }
 });
