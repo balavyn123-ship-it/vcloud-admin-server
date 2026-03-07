@@ -480,7 +480,11 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
         </a>
       </div>
 
-      <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">VclouD · vcloud-store.org</p>
+      <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">
+        <a href="https://vcloud-store.org/v2/orders.html" style="color:#a78bfa;text-decoration:none;">📦 Переглянути замовлення</a>
+        &nbsp;·&nbsp;
+        <a href="https://vcloud-store.org" style="color:#666;text-decoration:none;">vcloud-store.org</a>
+      </p>
     </div>`;
 
     const res = await fetch("https://api.resend.com/emails", {
