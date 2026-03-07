@@ -572,39 +572,56 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
   }
 });
 
-// ─── Одноразова міграція: додаємо NOWPayments колонки ──────────
+// ─── Міграція: додаємо NOWPayments колонки ────────────────────────
 app.get("/api/migrate-nowpayments", async (req, res) => {
-  try {
-    const cols = [
-      { name: "nowpayments_id",  type: "TEXT" },
-      { name: "paid_amount",     type: "TEXT" },
-      { name: "paid_currency",   type: "TEXT" },
-      { name: "paid_at",         type: "TIMESTAMPTZ" },
-      { name: "payment_method",  type: "TEXT" },
-      { name: "crypto_curr",     type: "TEXT" },
-    ];
-    const results = [];
-    for (const col of cols) {
-      // Пробуємо зробити select — якщо колонки немає, отримаємо помилку
-      const { error } = await supabase.from("orders").select(col.name).limit(1);
-      if (!error) {
-        results.push(`✅ ${col.name} — вже є`);
+  const ref = (SUPABASE_URL || "").replace("https://","").split(".")[0];
+  if (!ref) return res.status(500).json({ error: "SUPABASE_URL not set" });
+
+  const sqls = [
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS nowpayments_id TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_amount TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_currency TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_curr TEXT",
+  ];
+
+  const results = [];
+
+  for (const sql of sqls) {
+    const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1] || sql;
+
+    // Supabase pg-meta endpoint (вбудований в кожен Supabase проект)
+    const pgMetaUrl = `https://${ref}.supabase.co/pg-meta/v0/query`;
+    try {
+      const r = await fetch(pgMetaUrl, {
+        method: "POST",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: sql }),
+      });
+      const txt = await r.text();
+      if (r.ok || txt.includes("already exists")) {
+        results.push(`✅ ${col}`);
       } else {
-        // Колонки немає — додаємо через RPC або відзначаємо для ручного додавання
-        results.push(`⚠️ ${col.name} (${col.type}) — ПОТРІБНО ДОДАТИ ВРУЧНУ`);
+        results.push(`⚠️ ${col}: ${txt.slice(0,120)}`);
       }
+    } catch(e) {
+      results.push(`❌ ${col}: ${e.message}`);
     }
-    res.json({ ok: true, results, sql: [
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS nowpayments_id TEXT;",
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_amount TEXT;",
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_currency TEXT;",
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;",
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;",
-      "ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_curr TEXT;",
-    ]});
-  } catch (e) {
-    res.status(500).json({ error: e.message });
   }
+
+  // Перевіряємо реальний стан через select
+  const checks = [];
+  for (const col of ["nowpayments_id","paid_amount","paid_currency","paid_at"]) {
+    const { error } = await supabase.from("orders").select(col).limit(1);
+    checks.push(error ? `❌ ${col} відсутня` : `✅ ${col} є`);
+  }
+
+  res.json({ ok: true, migration: results, verification: checks });
 });
 
 app.listen(PORT, async () => {
