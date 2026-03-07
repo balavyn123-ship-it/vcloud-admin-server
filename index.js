@@ -40,10 +40,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // PostgreSQL прямий клієнт для DDL міграцій
 // Supabase connection string: postgresql://postgres.[ref]:[password]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
-const pgPool = process.env.DATABASE_URL ? new Pool({
-  connectionString: process.env.DATABASE_URL,
+const DB_URL = process.env.DATABASE_URL ||
+  "postgresql://postgres.rnvdfmenlvqerdnleesy:J94UseTs9ZVo9mF3@aws-0-eu-central-1.pooler.supabase.com:6543/postgres";
+const pgPool = new Pool({
+  connectionString: DB_URL,
   ssl: { rejectUnauthorized: false }
-}) : null;
+});
 
 app.use(cors());
 // Raw body потрібен для перевірки підпису NOWPayments webhook
