@@ -429,9 +429,69 @@ app.post("/api/user/login", async (req, res) => {
 });
 
 // ─── ORDERS — create ──────────────────────────────────────────────
+// ─── Telegram сповіщення ────────────────────────────────────────
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
+const TG_CHAT_ID   = process.env.TG_CHAT_ID   || "";
+
+async function sendTelegramNotification(order, items, total_uah, payment_method) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+  try {
+    const itemsText = (items || []).map(i =>
+      `  • ${i.name || i.title} × ${i.qty || i.quantity || 1} — ${i.price} ₴`
+    ).join('\n');
+
+    const payIcon = payment_method === 'crypto' ? '₿ Крипто' : '💳 Картка';
+    const msg = [
+      `🛍 *Нове замовлення #${order.id}*`,
+      ``,
+      `👤 *Клієнт:* ${order.name || '—'}`,
+      `📞 *Телефон:* ${order.phone || '—'}`,
+      `📧 *Email:* ${order.email || '—'}`,
+      ``,
+      `📦 *Доставка:*`,
+      `  🏙 Місто: ${order.city || '—'}`,
+      `  📮 НП: ${order.nova_poshta || '—'}`,
+      ``,
+      `🛒 *Товари:*`,
+      itemsText,
+      ``,
+      `💰 *Сума: ${total_uah} ₴*`,
+      `💳 *Оплата:* ${payIcon}`,
+      `📊 *Статус:* очікує оплати`,
+    ].join('\n');
+
+    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id:    TG_CHAT_ID,
+        text:       msg,
+        parse_mode: 'Markdown'
+      })
+    });
+  } catch (e) {
+    console.warn('Telegram notify failed:', e.message);
+  }
+}
+
+// ─── Telegram сповіщення при оплаті ─────────────────────────────
+async function sendTelegramPaidNotification(orderId, paidAmount, paidCurrency) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+  try {
+    const msg = `✅ *Оплачено замовлення #${orderId}*\n💰 Отримано: ${paidAmount} ${paidCurrency?.toUpperCase() || ''}`;
+    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'Markdown' })
+    });
+  } catch (e) {
+    console.warn('Telegram paid notify failed:', e.message);
+  }
+}
+
 app.post("/api/orders", async (req, res) => {
   try {
-    const { user_id, email, name, phone, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
+    const { user_id, email, name, phone, city, nova_poshta, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
     if (!email || !items || !items.length) return res.status(400).json({ error: "email та items обов'язкові" });
 
     const { data, error } = await supabase.from("orders").insert({
@@ -439,6 +499,8 @@ app.post("/api/orders", async (req, res) => {
       email:          email,
       name:           name || "",
       phone:          phone || "",
+      city:           city || "",
+      nova_poshta:    nova_poshta || "",
       items:          items,
       total_uah:      Number(total_uah) || 0,
       status:         "pending",
@@ -449,6 +511,10 @@ app.post("/api/orders", async (req, res) => {
     }).select().single();
 
     if (error) throw error;
+
+    // ─── Telegram сповіщення ───────────────────────────────────
+    await sendTelegramNotification(data, items, total_uah, payment_method);
+
     res.json({ ok: true, id: data.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -587,6 +653,11 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
       }).eq("id", order_id);
 
       console.log(`✅ Замовлення #${order_id} → статус: ${newStatus}`);
+
+      // Telegram — тільки при успішній оплаті
+      if (payment_status === "finished" || payment_status === "confirmed") {
+        await sendTelegramPaidNotification(order_id, actually_paid, pay_currency);
+      }
     }
 
     res.json({ ok: true });
@@ -605,6 +676,8 @@ app.get("/api/migrate-nowpayments", async (req, res) => {
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_curr TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS city TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS nova_poshta TEXT",
   ];
 
   const results = [];
