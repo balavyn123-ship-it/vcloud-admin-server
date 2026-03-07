@@ -341,6 +341,98 @@ app.get("/health", async (req, res) => {
   }
 });
 
+// ─── USER REGISTRATION ────────────────────────────────────────────
+app.post("/api/user/register", async (req, res) => {
+  try {
+    const { email, password, name, phone } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
+    if (password.length < 6) return res.status(400).json({ error: "Пароль мінімум 6 символів" });
+
+    const { data: existing } = await supabase.from("users").select("id").eq("email", email.toLowerCase()).maybeSingle();
+    if (existing) return res.status(409).json({ error: "Email вже зареєстрований" });
+
+    const crypto = require("crypto");
+    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
+
+    const { data, error } = await supabase.from("users").insert({
+      email: email.toLowerCase(),
+      password: hash,
+      name: name || "",
+      phone: phone || ""
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── USER LOGIN ───────────────────────────────────────────────────
+app.post("/api/user/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email і пароль обов'язкові" });
+
+    const crypto = require("crypto");
+    const hash = crypto.createHash("sha256").update(password + "vcloud_salt_2026").digest("hex");
+
+    const { data, error } = await supabase.from("users").select("id,email,name,phone,password").eq("email", email.toLowerCase()).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(401).json({ error: "Невірний email або пароль" });
+    if (data.password !== hash) return res.status(401).json({ error: "Невірний email або пароль" });
+
+    res.json({ id: data.id, email: data.email, name: data.name, phone: data.phone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ORDERS — create ──────────────────────────────────────────────
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { user_id, email, name, phone, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
+    if (!email || !items || !items.length) return res.status(400).json({ error: "email та items обов'язкові" });
+
+    const { data, error } = await supabase.from("orders").insert({
+      user_id:        user_id || email,
+      email:          email,
+      name:           name || "",
+      phone:          phone || "",
+      items:          items,
+      total_uah:      Number(total_uah) || 0,
+      status:         "pending",
+      payment_method: payment_method || "crypto",
+      crypto_curr:    crypto_curr || null,
+      crypto_addr:    crypto_addr || null,
+      crypto_amount:  crypto_amount ? String(crypto_amount) : null
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ ok: true, id: data.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ORDERS — get by user ─────────────────────────────────────────
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { user_id, email } = req.query;
+    if (!user_id && !email) return res.status(400).json({ error: "user_id або email обов'язковий" });
+
+    let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
+    if (user_id) query = query.eq("user_id", user_id);
+    else         query = query.eq("email", email.toLowerCase());
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ orders: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, async () => {
   console.log(`✅ VclouD Admin Server запущено на порту ${PORT}`);
   console.log(`🗄️  Supabase: ${SUPABASE_URL}`);
