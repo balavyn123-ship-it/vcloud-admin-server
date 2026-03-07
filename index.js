@@ -5,6 +5,7 @@ const cheerio = require("cheerio");
 const path = require("path");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
+const { Pool } = require("pg");
 
 // Завантажуємо .env лише локально (на Railway є env variables)
 require("dotenv").config();
@@ -36,6 +37,13 @@ if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// PostgreSQL прямий клієнт для DDL міграцій
+// Supabase connection string: postgresql://postgres.[ref]:[password]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
+const pgPool = process.env.DATABASE_URL ? new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+}) : null;
 
 app.use(cors());
 // Raw body потрібен для перевірки підпису NOWPayments webhook
@@ -574,9 +582,6 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
 
 // ─── Міграція: додаємо NOWPayments колонки ────────────────────────
 app.get("/api/migrate-nowpayments", async (req, res) => {
-  const ref = (SUPABASE_URL || "").replace("https://","").split(".")[0];
-  if (!ref) return res.status(500).json({ error: "SUPABASE_URL not set" });
-
   const sqls = [
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS nowpayments_id TEXT",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_amount TEXT",
@@ -588,35 +593,30 @@ app.get("/api/migrate-nowpayments", async (req, res) => {
 
   const results = [];
 
-  for (const sql of sqls) {
-    const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1] || sql;
-
-    // Supabase pg-meta endpoint (вбудований в кожен Supabase проект)
-    const pgMetaUrl = `https://${ref}.supabase.co/pg-meta/v0/query`;
+  if (pgPool) {
+    // Прямий PostgreSQL — найнадійніший варіант
+    const client = await pgPool.connect();
     try {
-      const r = await fetch(pgMetaUrl, {
-        method: "POST",
-        headers: {
-          "apikey": SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query: sql }),
-      });
-      const txt = await r.text();
-      if (r.ok || txt.includes("already exists")) {
-        results.push(`✅ ${col}`);
-      } else {
-        results.push(`⚠️ ${col}: ${txt.slice(0,120)}`);
+      for (const sql of sqls) {
+        const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1] || sql;
+        try {
+          await client.query(sql);
+          results.push(`✅ ${col} — OK`);
+        } catch(e) {
+          results.push(`⚠️ ${col}: ${e.message}`);
+        }
       }
-    } catch(e) {
-      results.push(`❌ ${col}: ${e.message}`);
+    } finally {
+      client.release();
     }
+  } else {
+    results.push("❌ DATABASE_URL не задана — додайте її в Render Environment Variables");
+    results.push("Значення: postgresql://postgres.rnvdfmenlvqerdnleesy:[DB_PASSWORD]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres");
   }
 
   // Перевіряємо реальний стан через select
   const checks = [];
-  for (const col of ["nowpayments_id","paid_amount","paid_currency","paid_at"]) {
+  for (const col of ["nowpayments_id","paid_amount","paid_currency","paid_at","payment_method","crypto_curr"]) {
     const { error } = await supabase.from("orders").select(col).limit(1);
     checks.push(error ? `❌ ${col} відсутня` : `✅ ${col} є`);
   }
