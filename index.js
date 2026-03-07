@@ -489,6 +489,23 @@ async function sendTelegramPaidNotification(orderId, paidAmount, paidCurrency) {
   }
 }
 
+// ─── Telegram сповіщення при скасуванні/закінченні часу ──────────
+async function sendTelegramCancelledNotification(orderId, reason) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+  try {
+    const icon = reason === 'expired' ? '⏰' : '❌';
+    const label = reason === 'expired' ? 'Час вийшов' : 'Помилка платежу';
+    const msg = `${icon} *Замовлення #${orderId} — ${label}*\nКлієнт не завершив оплату.`;
+    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'Markdown' })
+    });
+  } catch (e) {
+    console.warn('Telegram cancel notify failed:', e.message);
+  }
+}
+
 app.post("/api/orders", async (req, res) => {
   try {
     const { user_id, email, name, phone, city, nova_poshta, items, total_uah, payment_method, crypto_curr, crypto_addr, crypto_amount } = req.body;
@@ -653,9 +670,12 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
 
       console.log(`✅ Замовлення #${order_id} → статус: ${newStatus}`);
 
-      // Telegram — тільки при успішній оплаті
+      // Telegram — при успішній оплаті або скасуванні
       if (payment_status === "finished" || payment_status === "confirmed") {
         await sendTelegramPaidNotification(order_id, actually_paid, pay_currency);
+      }
+      if (payment_status === "failed" || payment_status === "expired") {
+        await sendTelegramCancelledNotification(order_id, payment_status);
       }
     }
 
