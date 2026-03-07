@@ -4,6 +4,7 @@ const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const path = require("path");
 const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const { createClient } = require("@supabase/supabase-js");
 const { Pool } = require("pg");
 
@@ -433,6 +434,77 @@ app.post("/api/user/login", async (req, res) => {
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
 const TG_CHAT_ID   = process.env.TG_CHAT_ID   || "";
 
+// ─── Email (nodemailer) ──────────────────────────────────────────
+const EMAIL_USER = process.env.EMAIL_USER || ""; // напр. vcloud.store@gmail.com
+const EMAIL_PASS = process.env.EMAIL_PASS || ""; // App Password Gmail
+
+function getMailTransporter() {
+  if (!EMAIL_USER || !EMAIL_PASS) return null;
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS }
+  });
+}
+
+async function sendOrderConfirmationEmail(order, items, total_uah) {
+  const transporter = getMailTransporter();
+  if (!transporter || !order.email) return;
+  try {
+    const itemsHtml = (items || []).map(i =>
+      `<tr>
+        <td style="padding:8px 0;color:#ccc;">${i.title || i.name}</td>
+        <td style="padding:8px 0;text-align:center;color:#ccc;">× ${i.qty || 1}</td>
+        <td style="padding:8px 0;text-align:right;font-weight:600;color:#fff;">${i.price * (i.qty || 1)} ₴</td>
+      </tr>`
+    ).join('');
+
+    const html = `
+    <div style="font-family:Inter,sans-serif;background:#0f0f0f;color:#fff;padding:32px;max-width:560px;margin:0 auto;border-radius:16px;">
+      <h2 style="color:#fff;margin-bottom:4px;">✅ Замовлення прийнято!</h2>
+      <p style="color:#888;margin-bottom:24px;">Замовлення <b style="color:#fff;">#${order.id}</b> успішно оформлено</p>
+
+      <div style="background:#1a1a1a;border-radius:12px;padding:16px;margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:12px;">📦 Доставка</div>
+        <div style="color:#ccc;font-size:14px;line-height:1.8;">
+          👤 ${order.name || '—'}<br>
+          📞 ${order.phone || '—'}<br>
+          🏙 ${order.city || '—'}<br>
+          📮 ${order.nova_poshta || '—'}
+        </div>
+      </div>
+
+      <div style="background:#1a1a1a;border-radius:12px;padding:16px;margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:12px;">🛒 Товари</div>
+        <table style="width:100%;border-collapse:collapse;">${itemsHtml}</table>
+        <div style="border-top:1px solid #333;margin-top:12px;padding-top:12px;display:flex;justify-content:space-between;">
+          <span style="color:#888;">Разом:</span>
+          <span style="font-weight:700;font-size:18px;color:#a78bfa;">${total_uah} ₴</span>
+        </div>
+      </div>
+
+      <div style="background:#1a1a2e;border:1px solid #2481cc44;border-radius:12px;padding:16px;text-align:center;">
+        <p style="color:#888;margin:0 0 12px;">Питання по замовленню?</p>
+        <a href="https://t.me/Danyastores?text=${encodeURIComponent(`Привіт! Питання по замовленню #${order.id}`)}"
+           style="display:inline-block;background:#2481cc;color:#fff;border-radius:8px;padding:10px 20px;text-decoration:none;font-weight:600;">
+          💬 Написати в Telegram
+        </a>
+      </div>
+
+      <p style="color:#444;font-size:12px;text-align:center;margin-top:24px;">VclouD · vcloud-v2.netlify.app</p>
+    </div>`;
+
+    await transporter.sendMail({
+      from: `"VclouD" <${EMAIL_USER}>`,
+      to:   order.email,
+      subject: `✅ Замовлення #${order.id} прийнято — VclouD`,
+      html
+    });
+    console.log(`📧 Email відправлено → ${order.email}`);
+  } catch (e) {
+    console.warn("Email send failed:", e.message);
+  }
+}
+
 async function sendTelegramNotification(order, items, total_uah, payment_method) {
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
   try {
@@ -529,8 +601,9 @@ app.post("/api/orders", async (req, res) => {
 
     if (error) throw error;
 
-    // ─── Telegram сповіщення ───────────────────────────────────
+    // ─── Telegram + Email сповіщення ──────────────────────────────────
     await sendTelegramNotification(data, items, total_uah, payment_method);
+    await sendOrderConfirmationEmail(data, items, total_uah);
 
     res.json({ ok: true, id: data.id });
   } catch (err) {
@@ -682,6 +755,60 @@ app.post("/api/nowpayments/webhook", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("NOWPayments webhook error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PORTMONE — створити платіж ──────────────────────────────────
+const PORTMONE_ID  = process.env.PORTMONE_ID  || ""; // payeeId від Portmone
+const PORTMONE_KEY = process.env.PORTMONE_KEY || ""; // secretKey
+
+app.post("/api/portmone/create", auth, async (req, res) => {
+  try {
+    const { order_id, amount_uah, email, description } = req.body;
+    if (!order_id || !amount_uah) return res.status(400).json({ error: "order_id, amount_uah обов'язкові" });
+
+    if (!PORTMONE_ID || !PORTMONE_KEY) {
+      return res.status(503).json({ error: "Portmone не налаштований (додайте PORTMONE_ID і PORTMONE_KEY в Render)" });
+    }
+
+    // Portmone API v2 — створення платежу
+    const body = {
+      method: "createPayment",
+      params: {
+        data: {
+          payee: { payeeId: PORTMONE_ID },
+          order: {
+            shopOrderNumber: String(order_id),
+            billAmount:      Number(amount_uah).toFixed(2),
+            billCurrency:    "UAH",
+            description:     description || `VclouD замовлення #${order_id}`,
+            successUrl:      `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}&paid=1`,
+            failureUrl:      `https://vcloud-v2.netlify.app/v2/checkout.html`,
+            payer: { email: email || "" }
+          }
+        }
+      }
+    };
+
+    const pmRes = await fetch("https://api.portmone.com.ua/r3/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const pmData = await pmRes.json();
+
+    if (pmData.error) return res.status(502).json({ error: pmData.error.message || "Portmone error" });
+
+    // Зберігаємо portmone token в замовленні
+    await supabase.from("orders")
+      .update({ nowpayments_id: "portmone_" + (pmData.result?.token || order_id), status: "waiting_payment" })
+      .eq("id", order_id);
+
+    // Portmone повертає token — редирект на їх сторінку
+    const payUrl = `https://www.portmone.com.ua/r3/?token=${pmData.result?.token}`;
+    res.json({ payment_url: payUrl, token: pmData.result?.token });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
