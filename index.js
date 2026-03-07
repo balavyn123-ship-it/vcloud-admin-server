@@ -490,7 +490,7 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        from: "VclouD <onboarding@resend.dev>",
+        from: "VclouD <noreply@vcloud-store.org>",
         to:   [order.email],
         subject: `✅ Замовлення #${order.id} прийнято — VclouD`,
         html
