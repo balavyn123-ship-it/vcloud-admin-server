@@ -540,29 +540,30 @@ app.get("/api/orders", async (req, res) => {
 });
 
 // ─── NOWPAYMENTS — створити інвойс ───────────────────────────────
-// POST /api/nowpayments/create  { order_id, amount_uah, currency, email, order_description }
+// POST /api/nowpayments/create  { order_id, amount_uah, email, order_description }
+// Створює Invoice — NOWPayments самі малюють сторінку оплати з вибором монети
 app.post("/api/nowpayments/create", async (req, res) => {
   try {
-    const { order_id, amount_uah, currency, email, order_description } = req.body;
-    if (!order_id || !amount_uah || !currency) {
-      return res.status(400).json({ error: "order_id, amount_uah, currency обов'язкові" });
+    const { order_id, amount_uah, email, order_description } = req.body;
+    if (!order_id || !amount_uah) {
+      return res.status(400).json({ error: "order_id, amount_uah обов'язкові" });
     }
 
-    // NOWPayments приймає суму в будь-якій фіатній валюті
-    // pay_currency — крипта, price_currency — фіат (UAH)
     const body = {
       price_amount:      Number(amount_uah),
       price_currency:    "uah",
-      pay_currency:      currency.toLowerCase(), // usdt, btc, eth, ton
       ipn_callback_url:  "https://vcloud-admin-server.onrender.com/api/nowpayments/webhook",
       order_id:          String(order_id),
-      order_description: order_description || "VclouD Order",
+      order_description: order_description || `VclouD замовлення #${order_id}`,
       customer_email:    email || "",
-      success_url:       `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}`,
-      cancel_url:        "https://vcloud-v2.netlify.app/v2/checkout.html"
+      success_url:       `https://vcloud-v2.netlify.app/v2/orders.html?new=1&order=${order_id}&paid=1`,
+      cancel_url:        "https://vcloud-v2.netlify.app/v2/checkout.html",
+      is_fixed_rate:     false,
+      is_fee_paid_by_user: false
     };
 
-    const nwpRes = await fetch(`${NWP_API}/payment`, {
+    // Використовуємо Invoice API — повертає invoice_url для редиректу
+    const nwpRes = await fetch(`${NWP_API}/invoice`, {
       method:  "POST",
       headers: {
         "x-api-key":    NWP_API_KEY,
@@ -573,22 +574,20 @@ app.post("/api/nowpayments/create", async (req, res) => {
 
     const nwpData = await nwpRes.json();
     if (!nwpRes.ok) {
-      console.error("NOWPayments error:", nwpData);
+      console.error("NOWPayments invoice error:", nwpData);
       return res.status(502).json({ error: nwpData.message || "NOWPayments API error" });
     }
 
-    // Зберігаємо nowpayments_id в замовленні
+    // Зберігаємо id інвойсу в замовленні
     await supabase.from("orders")
-      .update({ nowpayments_id: String(nwpData.payment_id), status: "waiting_payment" })
+      .update({ nowpayments_id: String(nwpData.id), status: "waiting_payment" })
       .eq("id", order_id);
 
+    // Повертаємо URL сторінки оплати NOWPayments
     res.json({
-      payment_id:      nwpData.payment_id,
-      pay_address:     nwpData.pay_address,
-      pay_amount:      nwpData.pay_amount,
-      pay_currency:    nwpData.pay_currency,
-      payment_status:  nwpData.payment_status,
-      expiration_estimate_date: nwpData.expiration_estimate_date
+      invoice_id:  nwpData.id,
+      invoice_url: nwpData.invoice_url,  // → редирект на цей URL
+      status:      nwpData.payment_status
     });
   } catch (err) {
     console.error("NOWPayments create error:", err);
