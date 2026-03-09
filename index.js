@@ -267,8 +267,14 @@ app.get("/api/products", auth, async (req, res) => {
 // Додати товар (SSE — стрімінг прогресу)
 app.post("/api/products", auth, async (req, res) => {
   try {
-    const { title, price, url, stock } = req.body;
+    const { title, price, currency, url, stock } = req.body;
     if (!title || !price) return res.status(400).json({ error: "Назва і ціна обов'язкові" });
+
+    // Валідуємо валюту
+    const validCurrencies = ['UAH', 'USD', 'EUR'];
+    const resolvedCurrency = validCurrencies.includes((currency || '').toUpperCase())
+      ? currency.toUpperCase()
+      : 'UAH';
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -294,7 +300,7 @@ app.post("/api/products", auth, async (req, res) => {
     const product = {
       title,
       price:       Number(price),
-      currency:    "UAH",
+      currency:    resolvedCurrency,
       category:    detectCategory(title),
       description: parsed.description,
       images:      parsed.images,
@@ -328,8 +334,12 @@ app.post("/api/products", auth, async (req, res) => {
 app.put("/api/products/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { title, price, description, image, stock } = req.body;
+    const { title, price, currency, description, image, stock } = req.body;
+    const validCurrencies = ['UAH', 'USD', 'EUR'];
     const fields = { title, price: Number(price), description, image };
+    if (currency && validCurrencies.includes(currency.toUpperCase())) {
+      fields.currency = currency.toUpperCase();
+    }
     if (stock !== undefined) fields.stock = stock === '' ? null : Number(stock);
     await dbUpdate(id, fields);
     res.json({ ok: true });
@@ -430,6 +440,71 @@ app.post("/api/user/login", async (req, res) => {
 });
 
 // ─── ORDERS — create ──────────────────────────────────────────────
+// ─── Хелпер форматування ціни на сервері ─────────────────────────
+function fmtCurrencyServer(price, currency) {
+  const n = Number(price || 0).toLocaleString('uk-UA');
+  if (currency === 'USD') return '$' + n;
+  if (currency === 'EUR') return '€' + n;
+  return n + ' ₴';
+}
+
+// ─── Monobank курси — кеш на 10 хвилин ──────────────────────────
+let _ratesCache = { data: null, ts: 0 };
+
+async function getMonobankRates() {
+  const now = Date.now();
+  if (_ratesCache.data && now - _ratesCache.ts < 10 * 60 * 1000) {
+    return _ratesCache.data;
+  }
+  try {
+    const res = await fetch('https://api.monobank.ua/bank/currency', {
+      headers: { 'User-Agent': 'VclouD/1.0' },
+      timeout: 5000
+    });
+    const list = await res.json();
+    // USD (840) → UAH (980), EUR (978) → UAH (980)
+    const usdRow = list.find(r => r.currencyCodeA === 840 && r.currencyCodeB === 980);
+    const eurRow = list.find(r => r.currencyCodeA === 978 && r.currencyCodeB === 980);
+    const rates = {
+      USD: usdRow?.rateSell || usdRow?.rateCross || 41.5,
+      EUR: eurRow?.rateSell || eurRow?.rateCross || 45.0,
+      UAH: 1
+    };
+    _ratesCache = { data: rates, ts: now };
+    console.log(`💱 Monobank rates updated: USD=${rates.USD}, EUR=${rates.EUR}`);
+    return rates;
+  } catch (e) {
+    console.warn('getMonobankRates: Monobank API failed:', e.message);
+    if (_ratesCache.data) return _ratesCache.data; // повертаємо старий кеш
+    return { USD: 41.5, EUR: 45.0, UAH: 1 };       // hard fallback
+  }
+}
+
+// ─── Публічний ендпоінт курсів ────────────────────────────────────
+app.get('/api/rates', async (req, res) => {
+  try {
+    const rates = await getMonobankRates();
+    res.json(rates);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Хелпер: конвертувати суму в UAH через Monobank ──────────────
+// Використовується для Portmone / NOWPayments (тільки UAH)
+async function convertToUah(amount, fromCurrency) {
+  if (!fromCurrency || fromCurrency === 'UAH') return Number(amount);
+  try {
+    const rates = await getMonobankRates();
+    const rate = rates[fromCurrency.toUpperCase()];
+    if (rate && rate > 0) return Math.round(Number(amount) * rate * 100) / 100;
+  } catch (e) {
+    console.warn(`convertToUah: failed for ${fromCurrency}:`, e.message);
+  }
+  const fallback = { USD: 41.5, EUR: 45.0 };
+  return Math.round(Number(amount) * (fallback[fromCurrency] || 41.5) * 100) / 100;
+}
+
 // ─── Telegram сповіщення ────────────────────────────────────────
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
 const TG_CHAT_ID   = process.env.TG_CHAT_ID   || "";
@@ -444,9 +519,16 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
       `<tr>
         <td style="padding:8px 0;color:#ccc;">${i.title || i.name}</td>
         <td style="padding:8px 0;text-align:center;color:#ccc;">× ${i.qty || 1}</td>
-        <td style="padding:8px 0;text-align:right;font-weight:600;color:#fff;">${i.price * (i.qty || 1)} ₴</td>
+        <td style="padding:8px 0;text-align:right;font-weight:600;color:#fff;">${fmtCurrencyServer(i.price * (i.qty || 1), i.currency || 'UAH')}</td>
       </tr>`
     ).join('');
+
+    // Визначаємо чи є різні валюти у кошику
+    const currencies = [...new Set((items||[]).map(i => i.currency || 'UAH'))];
+    const hasMixedCurrencies = currencies.length > 1;
+    const totalDisplay = hasMixedCurrencies
+      ? `${fmtCurrencyServer(total_uah, 'UAH')} (еквівалент)`
+      : fmtCurrencyServer(total_uah, currencies[0] || 'UAH');
 
     const html = `
     <div style="font-family:Inter,sans-serif;background:#0f0f0f;color:#fff;padding:32px;max-width:560px;margin:0 auto;border-radius:16px;">
@@ -468,7 +550,7 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
         <table style="width:100%;border-collapse:collapse;">${itemsHtml}</table>
         <div style="border-top:1px solid #333;margin-top:12px;padding-top:12px;display:flex;justify-content:space-between;">
           <span style="color:#888;">Разом:</span>
-          <span style="font-weight:700;font-size:18px;color:#a78bfa;">${total_uah} ₴</span>
+          <span style="font-weight:700;font-size:18px;color:#a78bfa;">${totalDisplay}</span>
         </div>
       </div>
 
@@ -514,9 +596,17 @@ async function sendOrderConfirmationEmail(order, items, total_uah) {
 async function sendTelegramNotification(order, items, total_uah, payment_method) {
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
   try {
-    const itemsText = (items || []).map(i =>
-      `  • ${i.name || i.title} × ${i.qty || i.quantity || 1} — ${i.price} ₴`
-    ).join('\n');
+    const itemsText = (items || []).map(i => {
+      const priceStr = fmtCurrencyServer(i.price, i.currency || 'UAH');
+      return `  • ${i.name || i.title} × ${i.qty || i.quantity || 1} — ${priceStr}`;
+    }).join('\n');
+
+    // Форматуємо загальну суму
+    const currencies = [...new Set((items||[]).map(i => i.currency || 'UAH'))];
+    const hasMixed = currencies.length > 1;
+    const totalStr = hasMixed
+      ? `${fmtCurrencyServer(total_uah, 'UAH')} (екв.)`
+      : fmtCurrencyServer(total_uah, currencies[0] || 'UAH');
 
     const payIcon = payment_method === 'crypto' ? '₿ Крипто' : '💳 Картка';
     const msg = [
@@ -533,7 +623,7 @@ async function sendTelegramNotification(order, items, total_uah, payment_method)
       `🛒 *Товари:*`,
       itemsText,
       ``,
-      `💰 *Сума: ${total_uah} ₴*`,
+      `💰 *Сума: ${totalStr}*`,
       `💳 *Оплата:* ${payIcon}`,
       `📊 *Статус:* очікує оплати`,
     ].join('\n');
@@ -636,18 +726,24 @@ app.get("/api/orders", async (req, res) => {
 });
 
 // ─── NOWPAYMENTS — створити інвойс ───────────────────────────────
-// POST /api/nowpayments/create  { order_id, amount_uah, email, order_description }
+// POST /api/nowpayments/create  { order_id, amount_uah, email, order_description, price_currency? }
 // Створює Invoice — NOWPayments самі малюють сторінку оплати з вибором монети
 app.post("/api/nowpayments/create", async (req, res) => {
   try {
-    const { order_id, amount_uah, email, order_description } = req.body;
+    const { order_id, amount_uah, email, order_description, price_currency } = req.body;
     if (!order_id || !amount_uah) {
       return res.status(400).json({ error: "order_id, amount_uah обов'язкові" });
     }
 
+    // NOWPayments підтримує UAH, USD, EUR напряму — передаємо оригінальну валюту
+    const validNwpCurrencies = ['uah', 'usd', 'eur'];
+    const currency = validNwpCurrencies.includes((price_currency||'').toLowerCase())
+      ? price_currency.toLowerCase()
+      : 'uah';
+
     const body = {
       price_amount:      Number(amount_uah),
-      price_currency:    "uah",
+      price_currency:    currency,
       ipn_callback_url:  "https://vcloud-admin-server.onrender.com/api/nowpayments/webhook",
       order_id:          String(order_id),
       order_description: order_description || `VclouD замовлення #${order_id}`,
