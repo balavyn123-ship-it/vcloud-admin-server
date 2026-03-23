@@ -7,6 +7,7 @@ const crypto = require("crypto");
 // nodemailer замінено на Resend HTTP API
 const { createClient } = require("@supabase/supabase-js");
 const { Pool } = require("pg");
+const odoo = require("./odoo");
 
 // Завантажуємо .env лише локально (на Railway є env variables)
 require("dotenv").config();
@@ -960,6 +961,304 @@ app.get("/api/migrate-nowpayments", async (req, res) => {
   }
 
   res.json({ ok: true, migration: results, verification: checks });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ODOO INTEGRATION
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Тест з'єднання з Odoo ──────────────────────────────────────
+app.get("/api/odoo/test", auth, async (req, res) => {
+  try {
+    if (!odoo.isConfigured()) {
+      return res.json({
+        ok: false,
+        configured: false,
+        error: "Odoo не налаштований. Додайте ODOO_URL, ODOO_DB, ODOO_USER, ODOO_API_KEY в Render Environment Variables."
+      });
+    }
+    const result = await odoo.testConnection();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Синхронізація товарів з Odoo (SSE стрімінг) ─────────────────
+app.post("/api/odoo/sync", auth, async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.flushHeaders();
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  try {
+    if (!odoo.isConfigured()) {
+      send({ step: "error", message: "❌ Odoo не налаштований. Додайте env змінні в Render." });
+      return res.end();
+    }
+
+    const { mode } = req.body || {};
+    // mode: "full" — повна синхронізація, "update" — тільки оновлені за останню годину
+
+    send({ step: "connect", message: "📡 Підключаюсь до Odoo..." });
+    const conn = await odoo.testConnection();
+    if (!conn.ok) {
+      send({ step: "error", message: `❌ Odoo з'єднання: ${conn.error}` });
+      return res.end();
+    }
+    send({ step: "connect", message: `✅ Odoo ${conn.server_version} — підключено` });
+
+    // Отримуємо товари з Odoo
+    send({ step: "fetch", message: "📦 Завантажую товари з Odoo..." });
+    const options = {};
+    if (mode === "update") {
+      // Тільки оновлені за останню годину
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
+      options.updatedAfter = hourAgo;
+    }
+    const odooProducts = await odoo.fetchOdooProducts(options);
+    send({ step: "fetch", message: `📦 Отримано ${odooProducts.length} товарів з Odoo` });
+
+    if (!odooProducts.length) {
+      send({ step: "done", message: "ℹ️ Нових/оновлених товарів не знайдено" });
+      return res.end();
+    }
+
+    // Отримуємо існуючі товари з БД для порівняння
+    const existing = await dbGetAll();
+    const existingByOdoo = {};
+    const existingBySku = {};
+    const existingByTitle = {};
+    for (const p of existing) {
+      if (p.odoo_id)  existingByOdoo[p.odoo_id] = p;
+      if (p.sku)      existingBySku[p.sku] = p;
+      if (p.title)    existingByTitle[p.title.toLowerCase().trim()] = p;
+    }
+
+    let created = 0, updated = 0, skipped = 0, photoSearched = 0;
+
+    for (let i = 0; i < odooProducts.length; i++) {
+      const op = odooProducts[i];
+      if (!op.active || !op.title || op.price <= 0) {
+        skipped++;
+        continue;
+      }
+
+      // Знаходимо існуючий товар: по odoo_id → sku → title
+      const match = existingByOdoo[op.odoo_id]
+        || (op.sku && existingBySku[op.sku])
+        || existingByTitle[op.title.toLowerCase().trim()];
+
+      if (match) {
+        // ОНОВЛЮЄМО
+        const updates = {};
+        if (op.price !== match.price) updates.price = op.price;
+        if (op.currency !== match.currency) updates.currency = op.currency;
+        if (op.stock != null && op.stock !== match.stock) updates.stock = op.stock;
+        if (op.description && op.description !== match.description) updates.description = op.description;
+        if (op.sku && op.sku !== match.sku) updates.sku = op.sku;
+        if (!match.odoo_id && op.odoo_id) updates.odoo_id = op.odoo_id;
+        if (op.category && op.category !== "other" && op.category !== match.category) updates.category = op.category;
+
+        if (Object.keys(updates).length > 0) {
+          try { await dbUpdate(match.id, updates); } catch (e) { /* skip column errors */ }
+          updated++;
+          if ((i + 1) % 10 === 0 || i === odooProducts.length - 1) {
+            send({ step: "sync", message: `🔄 ${i + 1}/${odooProducts.length} — оновлено: ${op.title.slice(0, 50)}` });
+          }
+        } else {
+          skipped++;
+        }
+      } else {
+        // СТВОРЮЄМО
+        // Якщо немає фото з Odoo → шукаємо через Bing
+        let images = op.images || [];
+        let image = op.image || "";
+        if (!image) {
+          send({ step: "photo", message: `🖼️ Шукаю фото: ${op.title.slice(0, 40)}...` });
+          images = await searchImages(op.title);
+          image = images[0] || "";
+          photoSearched++;
+        }
+
+        const newProduct = {
+          title:       op.title,
+          price:       op.price,
+          currency:    op.currency,
+          category:    op.category || detectCategory(op.title),
+          description: op.description || op.title,
+          images:      images,
+          image:       image,
+          source_url:  "",
+          ai_check:    "odoo",
+          date:        new Date().toISOString().slice(0, 10),
+          stock:       op.stock,
+          sku:         op.sku || null,
+          odoo_id:     op.odoo_id || null,
+        };
+
+        try {
+          await dbInsert(newProduct);
+          created++;
+        } catch (e) {
+          // Якщо помилка через нову колонку — пробуємо без sku/odoo_id
+          const { sku: _s, odoo_id: _o, ...fallback } = newProduct;
+          try { await dbInsert(fallback); created++; } catch { skipped++; }
+        }
+
+        if ((i + 1) % 5 === 0 || i === odooProducts.length - 1) {
+          send({ step: "sync", message: `📥 ${i + 1}/${odooProducts.length} — створено: ${op.title.slice(0, 50)}` });
+        }
+      }
+    }
+
+    send({
+      step: "done",
+      message: `✅ Синхронізацію завершено! Створено: ${created}, оновлено: ${updated}, пропущено: ${skipped}. Фото знайдено автоматично: ${photoSearched}`,
+      stats: { created, updated, skipped, photoSearched, total: odooProducts.length }
+    });
+    res.end();
+  } catch (err) {
+    send({ step: "error", message: `❌ Помилка: ${err.message}` });
+    res.end();
+  }
+});
+
+// ─── n8n Webhook — синхронізація з Google Sheets ────────────────
+// Приймає один товар або масив товарів від n8n
+// Логіка: знайти по title → update, інакше create (з авто-пошуком фото)
+app.post("/api/n8n/sync", auth, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body) ? req.body : [req.body];
+    if (!items.length) return res.status(400).json({ error: "Порожній запит" });
+
+    const allProducts = await dbGetAll();
+    const results = [];
+
+    for (const item of items) {
+      const { title, price, currency, stock, description } = item;
+      if (!title || !price) {
+        results.push({ title: title || "???", action: "skip", reason: "Немає title або price" });
+        continue;
+      }
+
+      const validCurrencies = ['UAH', 'USD', 'EUR'];
+      const resolvedCurrency = validCurrencies.includes((currency || '').toUpperCase())
+        ? currency.toUpperCase() : 'UAH';
+
+      // Шукаємо по назві (case-insensitive, trim)
+      const existing = allProducts.find(p =>
+        p.title && p.title.toLowerCase().trim() === title.toLowerCase().trim()
+      );
+
+      if (existing) {
+        // UPDATE — оновлюємо тільки змінені поля
+        const fields = {};
+        if (Number(price) !== existing.price) fields.price = Number(price);
+        if (resolvedCurrency !== existing.currency) fields.currency = resolvedCurrency;
+        if (stock !== undefined && stock !== null && Number(stock) !== existing.stock) fields.stock = Number(stock);
+        if (description && description !== existing.description) fields.description = description;
+
+        if (Object.keys(fields).length > 0) {
+          await dbUpdate(existing.id, fields);
+          results.push({ title, action: "updated", id: existing.id, fields: Object.keys(fields) });
+        } else {
+          results.push({ title, action: "unchanged", id: existing.id });
+        }
+      } else {
+        // CREATE — з авто-пошуком фото
+        let images = [];
+        let image = "";
+        try {
+          images = await searchImages(title);
+          image = images[0] || "";
+        } catch (e) {
+          // фото не знайдено — не критично
+        }
+
+        const product = {
+          title,
+          price: Number(price),
+          currency: resolvedCurrency,
+          category: detectCategory(title),
+          description: description || title,
+          images,
+          image,
+          source_url: "",
+          ai_check: images.length ? "✅ авто" : "⚠️ без фото",
+          date: new Date().toISOString().slice(0, 10),
+          stock: (stock !== undefined && stock !== null && stock !== '') ? Number(stock) : null,
+        };
+
+        const saved = await dbInsert(product);
+        allProducts.push(saved); // додаємо в кеш щоб не дублювати
+        results.push({ title, action: "created", id: saved.id, hasPhoto: !!image });
+      }
+    }
+
+    const created = results.filter(r => r.action === "created").length;
+    const updated = results.filter(r => r.action === "updated").length;
+    const unchanged = results.filter(r => r.action === "unchanged").length;
+    const skipped = results.filter(r => r.action === "skip").length;
+
+    res.json({
+      ok: true,
+      summary: `✅ Створено: ${created}, оновлено: ${updated}, без змін: ${unchanged}, пропущено: ${skipped}`,
+      total: items.length,
+      created,
+      updated,
+      unchanged,
+      skipped,
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// n8n — отримати товар по назві (для перевірки)
+app.get("/api/n8n/find", auth, async (req, res) => {
+  try {
+    const title = (req.query.title || "").toLowerCase().trim();
+    if (!title) return res.status(400).json({ error: "Параметр ?title= обов'язковий" });
+
+    const products = await dbGetAll();
+    const found = products.find(p => p.title && p.title.toLowerCase().trim() === title);
+
+    if (found) {
+      res.json({ exists: true, product: found });
+    } else {
+      res.json({ exists: false });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Міграція Odoo колонок ──────────────────────────────────────
+app.get("/api/migrate-odoo", async (req, res) => {
+  const sqls = [
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS sku TEXT",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS odoo_id INTEGER",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT",
+  ];
+  const results = [];
+  try {
+    const pool = getPgPool();
+    const client = await pool.connect();
+    try {
+      for (const sql of sqls) {
+        const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1] || sql;
+        try { await client.query(sql); results.push(`✅ ${col}`); }
+        catch (e) { results.push(`⚠️ ${col}: ${e.message}`); }
+      }
+    } finally { client.release(); }
+  } catch (e) {
+    results.push(`❌ PG: ${e.message}`);
+    pgPool = null;
+  }
+  res.json({ ok: true, results });
 });
 
 app.listen(PORT, async () => {
